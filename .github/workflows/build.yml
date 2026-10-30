@@ -1,7 +1,44 @@
+
 name: Build kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      defconfig_choice:
+        description: "Which defconfig should build.sh apply?"
+        type: choice
+        required: true
+        default: both
+        options:
+          - droidspace
+          - usbarsenal
+          - both
+
+      patch_choice:
+        description: "Which patches should build.sh apply?"
+        type: choice
+        required: true
+        default: both
+        options:
+          - droidspace
+          - usbarsenal
+          - both
+
+      build_mode:
+        description: "Build mode"
+        type: choice
+        required: true
+        default: configured
+        options:
+          - configured
+          - clean
+
+      push_to_release:
+        description: "Upload the build to a GitHub Release"
+        type: boolean
+        required: true
+        default: true
+
   push:
     branches:
       - 16.2
@@ -22,6 +59,11 @@ env:
   DEFCONFIG: arch/arm64/configs/vendor/xiaomi/miatoll_defconfig
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_MAXSIZE: 3G
+
+  # Options consumed by build.sh
+  DEFCONFIG_CHOICE: ${{ inputs.defconfig_choice || 'both' }}
+  PATCH_CHOICE: ${{ inputs.patch_choice || 'both' }}
+  BUILD_MODE: ${{ inputs.build_mode || 'configured' }}
 
 jobs:
   build:
@@ -70,6 +112,13 @@ jobs:
             ccache-${{ runner.os }}-${{ github.ref_name }}-
             ccache-${{ runner.os }}-
 
+      - name: Show build configuration
+        run: |
+          echo "Build mode: $BUILD_MODE"
+          echo "Defconfig selection: $DEFCONFIG_CHOICE"
+          echo "Patch selection: $PATCH_CHOICE"
+          echo "Publish release: ${{ github.event_name != 'workflow_dispatch' || inputs.push_to_release }}"
+
       - name: Build kernel
         run: bash build.sh
 
@@ -82,6 +131,7 @@ jobs:
           retention-days: 30
 
       - name: Publish release
+        if: github.event_name != 'workflow_dispatch' || inputs.push_to_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -101,7 +151,10 @@ jobs:
           fi
 
           title="BlackHole miatoll ${GITHUB_REF_NAME} (${GITHUB_SHA::7})"
-          notes="Automated kernel build with Droidspaces and USB Arsenal add-ons.
+          notes="Automated kernel build.
+          Build mode: ${BUILD_MODE}
+          Defconfig: ${DEFCONFIG_CHOICE}
+          Patches: ${PATCH_CHOICE}
           Commit: ${GITHUB_SHA}
           Ref: ${GITHUB_REF_NAME}
           Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
