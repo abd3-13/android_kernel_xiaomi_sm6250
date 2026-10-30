@@ -136,3 +136,13 @@ gcc32/
 gcc64/
 out/
 AnyKernel/
+
+# Add-on download cache
+addons/.cache/
+
+# ccache
+.ccache/
+
+# Keep CI configuration tracked (the ".*" rule above hides it)
+!.github/
+!.github/**

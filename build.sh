@@ -1,50 +1,128 @@
 #!/bin/bash
-function compile()
-{
-source ~/.bashrc && source ~/.profile
-export LC_ALL=C && export USE_CCACHE=1
-ccache -M 25G
-TANGGAL=$(date +"%Y%m%d-%H")
-export ARCH=arm64
-export KBUILD_BUILD_HOST=android-build
-export KBUILD_BUILD_USER="kim_chi_96"
-clangbin=clang/bin/clang
-if ! [ -a $clangbin ]; then git clone --depth=1 https://bitbucket.org/nothinghere69/neutron.git clang
+#
+# Build the miatoll kernel with the Droidspaces and USB Arsenal add-ons.
+#
+# The add-on patches and config fragments are applied at build time by
+# addons/apply-addons.sh, so this branch stays clean and can be synced from
+# upstream without conflicts.
+#
+# Environment overrides:
+#   OUT             output directory      (default: out)
+#   DEFCONFIG       defconfig target      (default: arch/arm64/configs/vendor/xiaomi/miatoll_defconfig)
+#   JOBS            parallel make jobs    (default: nproc)
+#   CCACHE_MAXSIZE  ccache size limit     (default: 25G)
+#   TANGGAL         zip timestamp         (default: date +%Y%m%d-%H)
+#
+set -o pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+export ARCH="${ARCH:-arm64}"
+OUT="${OUT:-out}"
+DEFCONFIG="${DEFCONFIG:-arch/arm64/configs/vendor/xiaomi/miatoll_defconfig}"
+JOBS="${JOBS:-$(nproc --all)}"
+CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-25G}"
+TANGGAL="${TANGGAL:-$(date +"%Y%m%d-%H")}"
+
+export LC_ALL=C
+export KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-android-build}"
+export KBUILD_BUILD_USER="${KBUILD_BUILD_USER:-kim_chi_96}"
+
+# Keep local shell customisations working, but never let them abort the build.
+[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc" >/dev/null 2>&1 || true
+[ -f "$HOME/.profile" ] && . "$HOME/.profile" >/dev/null 2>&1 || true
+
+# shellcheck source=/dev/null
+[ -f "$ROOT/addons/addons.env" ] && . "$ROOT/addons/addons.env"
+
+ANYKERNEL_REPO="${ANYKERNEL_REPO:-https://github.com/Amritorock/AnyKernel3}"
+ANYKERNEL_REF="${ANYKERNEL_REF:-560fd55ddf072309e316315684ba57eaef795632}"
+
+CCACHE_CMD=""
+if command -v ccache >/dev/null 2>&1; then
+	ccache -M "$CCACHE_MAXSIZE" >/dev/null
+	CCACHE_CMD="ccache "
 fi
-gcc64bin=gcc64/bin/aarch64-linux-android-as
-if ! [ -a $gcc64bin ]; then git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc64
+
+clone_toolchain() {
+	local dest="$1" url="$2" marker="$3"
+
+	[ -e "$marker" ] && return 0
+
+	echo "Cloning toolchain: $url"
+	rm -rf "$dest"
+	git clone --depth=1 "$url" "$dest"
+}
+
+clone_toolchain clang \
+	https://github.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-6443078 \
+	clang/bin/clang || exit 1
+clone_toolchain gcc64 \
+	https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+	gcc64/bin/aarch64-linux-android-as || exit 1
+clone_toolchain gcc32 \
+	https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 \
+	gcc32/bin/arm-linux-androideabi-as || exit 1
+
+bash ./addons/apply-addons.sh prepare \
+	--defconfig "$DEFCONFIG" \
+	--out "$OUT" || {
+	echo "Failed to prepare kernel add-ons"
+	exit 1
+}
+
+echo "Building kernel ($JOBS jobs)..."
+PATH="$ROOT/clang/bin:$ROOT/gcc32/bin:$ROOT/gcc64/bin:$PATH" \
+	make -j"$JOBS" O="$OUT" \
+		ARCH="$ARCH" \
+		CC="${CCACHE_CMD}clang" \
+		HOSTCC="${CCACHE_CMD}gcc" \
+		CLANG_TRIPLE=aarch64-linux-gnu- \
+		CROSS_COMPILE="$ROOT/gcc64/bin/aarch64-linux-android-" \
+		CROSS_COMPILE_ARM32="$ROOT/gcc32/bin/arm-linux-androideabi-" \
+		LD=ld.lld \
+		CONFIG_NO_ERROR_ON_MISMATCH=y || {
+	echo "Kernel build failed"
+	exit 1
+}
+
+zimage="$OUT/arch/arm64/boot/Image.gz"
+if [ ! -f "$zimage" ]; then
+	echo "Failed to compile kernel: $zimage not found"
+	exit 1
 fi
-gcc32bin=gcc32/bin/arm-linux-androideabi-as
-if ! [ -a $gcc32bin ]; then git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc32
-fi
+
+echo "Kernel compile successful"
+
 rm -rf AnyKernel
-make O=out ARCH=arm64 vendor/xiaomi/miatoll_defconfig
-PATH="${PWD}/clang/bin:${PATH}:${PWD}/gcc32/bin:${PATH}:${PWD}/gcc64/bin:${PATH}" \
-make -j$(nproc --all) O=out \
-                      ARCH=arm64 \
-                      LLVM=1 \
-                      LLVM_IAS=1 \
-                      CC="clang" \
-                      CLANG_TRIPLE=aarch64-linux-gnu- \
-                      CROSS_COMPILE="${PWD}/gcc64/bin/aarch64-linux-android-" \
-                      CROSS_COMPILE_ARM32="${PWD}/gcc32/bin/arm-linux-androideabi-" \
-                      LD=ld.lld \
-                      CONFIG_NO_ERROR_ON_MISMATCH=y
+git clone --depth=1 "$ANYKERNEL_REPO" AnyKernel || {
+	echo "Failed to clone $ANYKERNEL_REPO"
+	exit 1
 }
-function zupload()
-{
-zimage=out/arch/arm64/boot/Image.gz
-if ! [ -a $zimage ];
-then
-echo  " Failed To Compile Kernel"
-else
-echo -e " Kernel Compile Successful"
-git clone --depth=1 https://github.com/Amritorock/AnyKernel3 -b r5x AnyKernel
-cp out/arch/arm64/boot/Image.gz AnyKernel
-cd AnyKernel
-zip -r9 BlackHole-V4-NON-KSU-miatoll-${TANGGAL}.zip *
-cd ../
-fi
+git -C AnyKernel fetch --depth=1 origin "$ANYKERNEL_REF" || {
+	echo "Failed to fetch AnyKernel3 ref $ANYKERNEL_REF"
+	exit 1
 }
-compile
-zupload
+git -C AnyKernel checkout --detach "$ANYKERNEL_REF" || {
+	echo "Failed to check out AnyKernel3 ref $ANYKERNEL_REF"
+	exit 1
+}
+cp "$zimage" AnyKernel/ || {
+	echo "Failed to copy $zimage into AnyKernel"
+	exit 1
+}
+
+zip_name="BlackHole-v2.1_KSU-miatoll-${TANGGAL}.zip"
+(
+	cd AnyKernel
+	zip -r9 "$zip_name" * >/dev/null || exit 1
+	sha256sum "$zip_name" > "$zip_name.sha256" || exit 1
+) || {
+	echo "Failed to create $zip_name"
+	exit 1
+}
+
+zip_path="$ROOT/AnyKernel/$zip_name"
+echo "Release zip: $zip_path"
+cat "$zip_path.sha256"
